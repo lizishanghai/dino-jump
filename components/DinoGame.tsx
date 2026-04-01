@@ -11,45 +11,20 @@ interface ExtendedWindow extends Window {
     webkitAudioContext?: typeof AudioContext;
 }
 
-interface VisionState {
-    poseLandmarker: any;
-    lastVideoTime: number;
-    results: any;
+interface PlayerVisionState {
     prevY: number;
     prevTime: number;
     smoothedVelocity: number;
     peakVelocity: number;
+}
+
+interface VisionState {
+    poseLandmarker: any;
+    lastVideoTime: number;
+    results: any;
     JUMP_VELOCITY_THRESHOLD: number;
     lastPredictionTime: number;
-}
-
-// Entity Interfaces for Pooling
-interface GameObject {
-    active: boolean;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    // Specific props
-    color?: string;
-}
-
-interface GameEngineState {
-    gameRunning: boolean;
-    canRestart: boolean;
-    score: number;
-    gameSpeed: number;
-    lastTime: number;
-    // Pools
-    obstaclePool: Cactus[];
-    groundPool: GroundDetail[];
-    spawnTimer: number;
-    groundSpawnTimer: number;
-    animationId: number;
-    visionAnimationId: number;
-    dino: DinoEntity;
-    hasStarted: boolean;
-    cameraReady: boolean;
+    players: PlayerVisionState[];
 }
 
 interface DinoEntity {
@@ -62,13 +37,39 @@ interface DinoEntity {
     jumpTimer: number;
     legState: boolean;
     animTimer: number;
+    color: string;
+    playerIndex: number;
+    collectibleScore: number;
     jump: () => boolean;
     update: (dt: number, onStep?: () => void) => void;
     draw: (ctx: CanvasRenderingContext2D) => void;
     reset: () => void;
 }
 
+interface GameEngineState {
+    gameRunning: boolean;
+    canRestart: boolean;
+    score: number;
+    gameSpeed: number;
+    lastTime: number;
+    obstaclePool: Cactus[];
+    groundPool: GroundDetail[];
+    collectiblePool: Collectible[];
+    spawnTimer: number;
+    groundSpawnTimer: number;
+    collectibleSpawnTimer: number;
+    animationId: number;
+    visionAnimationId: number;
+    dinos: DinoEntity[];
+    hasStarted: boolean;
+    cameraReady: boolean;
+}
+
 // --- CONSTANTS ---
+
+const PLAYER_COLORS = ['#535353', '#ff5252', '#4CAF50', '#2196F3'];
+const COLLECTIBLE_TYPES = ['star', 'heart', 'diamond'] as const;
+type CollectibleType = typeof COLLECTIBLE_TYPES[number];
 
 const GAME_CONFIG = {
     CANVAS_WIDTH: 800,
@@ -76,9 +77,9 @@ const GAME_CONFIG = {
     GROUND_Y: 242,
     GRAVITY: 4000,
     JUMP_FORCE: 1000,
-    INITIAL_SPEED: 400,
-    MAX_SPEED: 1200,
-    SPEED_INCREMENT: 10,
+    INITIAL_SPEED: 200,
+    MAX_SPEED: 600,
+    SPEED_INCREMENT: 5,
     DINO_START_X: 50,
     DINO_GROUND_Y: 200,
     VISION_FPS: 30,
@@ -95,7 +96,7 @@ const GAME_CONFIG = {
 const SoundSynth = {
     ctx: null as AudioContext | null,
     bufferCache: {} as Record<string, AudioBuffer>,
-    
+
     init: () => {
         if (!SoundSynth.ctx) {
             const Win = window as ExtendedWindow;
@@ -127,21 +128,21 @@ const SoundSynth = {
     playJump: () => {
         const ctx = SoundSynth.ctx;
         if (!ctx) return;
-        
+
         const t = ctx.currentTime;
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        
+
         osc.connect(gain);
         gain.connect(ctx.destination);
-        
+
         osc.type = 'square';
         osc.frequency.setValueAtTime(150, t);
         osc.frequency.exponentialRampToValueAtTime(600, t + 0.1);
-        
+
         gain.gain.setValueAtTime(0.1, t);
         gain.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
-        
+
         osc.start(t);
         osc.stop(t + 0.1);
     },
@@ -149,36 +150,36 @@ const SoundSynth = {
     playStep: () => {
         const ctx = SoundSynth.ctx;
         if (!ctx || !SoundSynth.bufferCache['step']) return;
-        
+
         const t = ctx.currentTime;
         const noise = ctx.createBufferSource();
         noise.buffer = SoundSynth.bufferCache['step'];
-        
+
         const filter = ctx.createBiquadFilter();
         filter.type = 'lowpass';
         filter.frequency.setValueAtTime(1200, t);
         filter.frequency.exponentialRampToValueAtTime(100, t + 0.04);
 
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.3, t); 
+        gain.gain.setValueAtTime(0.3, t);
         gain.gain.exponentialRampToValueAtTime(0.01, t + 0.04);
-        
+
         noise.connect(filter);
         filter.connect(gain);
         gain.connect(ctx.destination);
-        
+
         noise.start(t);
     },
 
     playRoar: () => {
         const ctx = SoundSynth.ctx;
         if (!ctx || !SoundSynth.bufferCache['roar']) return;
-        
+
         const t = ctx.currentTime;
-        
+
         const noise = ctx.createBufferSource();
         noise.buffer = SoundSynth.bufferCache['roar'];
-        
+
         const noiseFilter = ctx.createBiquadFilter();
         noiseFilter.type = 'lowpass';
         noiseFilter.frequency.setValueAtTime(800, t);
@@ -196,7 +197,7 @@ const SoundSynth = {
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(150, t);
         osc.frequency.linearRampToValueAtTime(50, t + 0.6);
-        
+
         const oscGain = ctx.createGain();
         oscGain.gain.setValueAtTime(0.08, t);
         oscGain.gain.linearRampToValueAtTime(0, t + 0.6);
@@ -208,6 +209,29 @@ const SoundSynth = {
         osc.start(t);
         noise.stop(t + 0.6);
         osc.stop(t + 0.6);
+    },
+
+    playCollect: () => {
+        const ctx = SoundSynth.ctx;
+        if (!ctx) return;
+
+        const t = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(800, t);
+        osc.frequency.exponentialRampToValueAtTime(1200, t + 0.08);
+        osc.frequency.exponentialRampToValueAtTime(1600, t + 0.15);
+
+        gain.gain.setValueAtTime(0.12, t);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+
+        osc.start(t);
+        osc.stop(t + 0.15);
     }
 };
 
@@ -235,7 +259,6 @@ class GroundDetail {
 
     draw(ctx: CanvasRenderingContext2D) {
         if (!this.active) return;
-        // Optimization: Assume context color is already set to PRIMARY
         ctx.fillRect(Math.floor(this.x), Math.floor(this.y), this.width, this.height);
     }
 }
@@ -266,15 +289,76 @@ class Cactus {
         const iy = Math.floor(this.y);
         const w3 = Math.floor(this.width / 3);
         const h = Math.floor(this.height);
-        
-        // Main stem
+
         ctx.fillRect(ix + w3, iy, w3, h);
-        // Left arm
-        ctx.fillRect(ix, iy + 10, w3, 5); 
+        ctx.fillRect(ix, iy + 10, w3, 5);
         ctx.fillRect(ix, iy + 5, 5, 10);
-        // Right arm
         ctx.fillRect(ix + 2*w3, iy + 15, w3, 5);
         ctx.fillRect(ix + Math.floor(this.width) - 5, iy + 5, 5, 15);
+    }
+}
+
+class Collectible {
+    active: boolean = false;
+    x: number = 0;
+    y: number = 0;
+    width: number = 20;
+    height: number = 20;
+    type: CollectibleType = 'star';
+
+    spawn(startX: number) {
+        this.x = startX;
+        this.y = 150 + Math.random() * 70;
+        this.type = COLLECTIBLE_TYPES[Math.floor(Math.random() * COLLECTIBLE_TYPES.length)];
+        this.active = true;
+    }
+
+    update(dt: number, speed: number) {
+        if (!this.active) return;
+        this.x -= speed * dt;
+        if (this.x < -this.width) this.active = false;
+    }
+
+    draw(ctx: CanvasRenderingContext2D) {
+        if (!this.active) return;
+        const cx = Math.floor(this.x) + 10;
+        const cy = Math.floor(this.y) + 10;
+
+        ctx.save();
+        if (this.type === 'star') {
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            for (let i = 0; i < 5; i++) {
+                const angle = (i * 4 * Math.PI) / 5 - Math.PI / 2;
+                const r = i === 0 ? 0 : 10;
+                if (i === 0) ctx.moveTo(cx + 10 * Math.cos(-Math.PI / 2), cy + 10 * Math.sin(-Math.PI / 2));
+                else {
+                    ctx.lineTo(cx + 4 * Math.cos(angle - (2 * Math.PI) / 10), cy + 4 * Math.sin(angle - (2 * Math.PI) / 10));
+                    ctx.lineTo(cx + 10 * Math.cos(angle), cy + 10 * Math.sin(angle));
+                }
+            }
+            ctx.closePath();
+            ctx.fill();
+        } else if (this.type === 'heart') {
+            ctx.fillStyle = '#FF69B4';
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + 3);
+            ctx.bezierCurveTo(cx, cy - 3, cx - 8, cy - 3, cx - 8, cy + 3);
+            ctx.bezierCurveTo(cx - 8, cy + 8, cx, cy + 12, cx, cy + 14);
+            ctx.bezierCurveTo(cx, cy + 12, cx + 8, cy + 8, cx + 8, cy + 3);
+            ctx.bezierCurveTo(cx + 8, cy - 3, cx, cy - 3, cx, cy + 3);
+            ctx.fill();
+        } else {
+            ctx.fillStyle = '#00CED1';
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 10);
+            ctx.lineTo(cx + 8, cy);
+            ctx.lineTo(cx, cy + 10);
+            ctx.lineTo(cx - 8, cy);
+            ctx.closePath();
+            ctx.fill();
+        }
+        ctx.restore();
     }
 }
 
@@ -287,7 +371,7 @@ const getFromPool = <T extends { active: boolean }>(pool: T[], factory: () => T)
     return newItem;
 };
 
-const createDino = (): DinoEntity => ({
+const createDino = (playerIndex: number, color: string): DinoEntity => ({
     x: GAME_CONFIG.DINO_START_X,
     y: GAME_CONFIG.DINO_GROUND_Y,
     width: 40,
@@ -297,7 +381,10 @@ const createDino = (): DinoEntity => ({
     jumpTimer: 0,
     legState: false,
     animTimer: 0,
-    
+    color,
+    playerIndex,
+    collectibleScore: 0,
+
     reset() {
         this.y = GAME_CONFIG.DINO_GROUND_Y;
         this.dy = 0;
@@ -305,21 +392,21 @@ const createDino = (): DinoEntity => ({
         this.jumpTimer = 0;
         this.legState = false;
         this.animTimer = 0;
+        this.collectibleScore = 0;
     },
 
     draw(ctx: CanvasRenderingContext2D) {
-        // Optimization: Use Math.floor for sharp pixels
         const ix = Math.floor(this.x);
         const iy = Math.floor(this.y);
 
-        ctx.fillStyle = GAME_CONFIG.COLORS.PRIMARY;
+        ctx.fillStyle = this.color;
         // Body
         ctx.fillRect(ix + 10, iy, 20, 25);
         // Head
         ctx.fillRect(ix + 15, iy - 10, 25, 18);
         // Tail
         ctx.fillRect(ix, iy + 5, 10, 5);
-        
+
         // Legs Animation
         if (!this.grounded) {
             ctx.fillRect(ix + 10, iy + 25, 5, 10);
@@ -334,8 +421,15 @@ const createDino = (): DinoEntity => ({
 
         ctx.fillStyle = GAME_CONFIG.COLORS.WHITE;
         ctx.fillRect(ix + 30, iy - 5, 3, 3); // Eye
-        
-        // Reset color to primary for next draw calls
+
+        // Player indicator (small colored dot above head for multiplayer)
+        if (this.playerIndex > 0 || true) {
+            ctx.fillStyle = this.color;
+            ctx.font = "8px 'Press Start 2P'";
+            ctx.textAlign = "center";
+            ctx.fillText(`P${this.playerIndex + 1}`, ix + 20, iy - 15);
+        }
+
         ctx.fillStyle = GAME_CONFIG.COLORS.PRIMARY;
     },
 
@@ -372,6 +466,13 @@ const createDino = (): DinoEntity => ({
     }
 });
 
+const createPlayerVisionState = (): PlayerVisionState => ({
+    prevY: 0,
+    prevTime: 0,
+    smoothedVelocity: 0,
+    peakVelocity: 0,
+});
+
 
 const DinoGame: React.FC = () => {
     // --- REFS ---
@@ -379,7 +480,7 @@ const DinoGame: React.FC = () => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const outputCanvasRef = useRef<HTMLCanvasElement>(null);
     const jumpSignalRef = useRef<HTMLDivElement>(null);
-    
+
     // --- REACT STATE ---
     const [isLoading, setIsLoading] = useState(true);
     const [status, setStatus] = useState("Stand back and JUMP to control!");
@@ -390,8 +491,10 @@ const DinoGame: React.FC = () => {
     const [hasStarted, setHasStarted] = useState(false);
     const [cameraReady, setCameraReady] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
+    const [playerCount, setPlayerCount] = useState(1);
 
     const mutedRef = useRef(false);
+    const playerCountRef = useRef(1);
 
     // --- ENGINE STATE (Mutable) ---
     const engineRef = useRef<GameEngineState>({
@@ -400,14 +503,15 @@ const DinoGame: React.FC = () => {
         score: 0,
         gameSpeed: GAME_CONFIG.INITIAL_SPEED,
         lastTime: 0,
-        // Pre-allocate pools
         obstaclePool: Array.from({ length: 10 }, () => new Cactus()),
         groundPool: Array.from({ length: 50 }, () => new GroundDetail()),
+        collectiblePool: Array.from({ length: 10 }, () => new Collectible()),
         spawnTimer: 0,
         groundSpawnTimer: 0,
+        collectibleSpawnTimer: 2,
         animationId: 0,
         visionAnimationId: 0,
-        dino: createDino(),
+        dinos: [createDino(0, PLAYER_COLORS[0])],
         hasStarted: false,
         cameraReady: false
     });
@@ -417,41 +521,52 @@ const DinoGame: React.FC = () => {
         poseLandmarker: null,
         lastVideoTime: -1,
         results: undefined,
-        prevY: 0,
-        prevTime: 0,
-        smoothedVelocity: 0,
-        peakVelocity: 0,
         JUMP_VELOCITY_THRESHOLD: 1.2,
-        lastPredictionTime: 0
+        lastPredictionTime: 0,
+        players: [createPlayerVisionState()]
     });
 
     useEffect(() => {
         mutedRef.current = isMuted;
     }, [isMuted]);
 
+    useEffect(() => {
+        playerCountRef.current = playerCount;
+    }, [playerCount]);
+
     // --- GAME LOGIC ---
 
     const spawnObstacle = (dt: number) => {
         const engine = engineRef.current;
         engine.spawnTimer -= dt;
-        
+
         if (engine.spawnTimer <= 0) {
             const r = Math.random();
             let count = r > 0.8 ? 3 : (r > 0.5 ? 2 : 1);
 
-            let nextX = GAME_CONFIG.CANVAS_WIDTH; 
+            let nextX = GAME_CONFIG.CANVAS_WIDTH;
 
             for (let i = 0; i < count; i++) {
                 const cactus = getFromPool(engine.obstaclePool, () => new Cactus());
                 cactus.spawn(nextX);
-                nextX += cactus.width + (5 + Math.random() * 20); 
+                nextX += cactus.width + (5 + Math.random() * 20);
             }
-            
-            engine.spawnTimer = 1.0 + (count * 0.4) + Math.random() * 1.2; 
-            
+
+            engine.spawnTimer = 1.0 + (count * 0.4) + Math.random() * 1.2;
+
             if(engine.gameSpeed < GAME_CONFIG.MAX_SPEED) {
-                engine.gameSpeed += GAME_CONFIG.SPEED_INCREMENT; 
+                engine.gameSpeed += GAME_CONFIG.SPEED_INCREMENT;
             }
+        }
+    };
+
+    const spawnCollectibles = (dt: number) => {
+        const engine = engineRef.current;
+        engine.collectibleSpawnTimer -= dt;
+        if (engine.collectibleSpawnTimer <= 0) {
+            const collectible = getFromPool(engine.collectiblePool, () => new Collectible());
+            collectible.spawn(GAME_CONFIG.CANVAS_WIDTH);
+            engine.collectibleSpawnTimer = 3.0 + Math.random() * 2.0;
         }
     };
 
@@ -461,7 +576,7 @@ const DinoGame: React.FC = () => {
         if (engine.groundSpawnTimer <= 0) {
             const detail = getFromPool(engine.groundPool, () => new GroundDetail());
             detail.spawn(GAME_CONFIG.CANVAS_WIDTH);
-            engine.groundSpawnTimer = 0.05 + Math.random() * 0.2; 
+            engine.groundSpawnTimer = 0.05 + Math.random() * 0.2;
         }
     };
 
@@ -469,14 +584,14 @@ const DinoGame: React.FC = () => {
         const engine = engineRef.current;
         engine.gameRunning = false;
         engine.canRestart = false;
-        
+
         setGameRunning(false);
-        setCanRestart(false); 
-        
+        setCanRestart(false);
+
         if (!mutedRef.current) {
             SoundSynth.playRoar();
         }
-        
+
         setTimeout(() => {
             engine.canRestart = true;
             setCanRestart(true);
@@ -488,12 +603,11 @@ const DinoGame: React.FC = () => {
         if (!engine.gameRunning) return;
 
         if (!engine.lastTime) engine.lastTime = timestamp;
-        // Cap Delta Time to prevent huge jumps on frame drops (0.1s max)
-        const dt = Math.min((timestamp - engine.lastTime) / 1000, 0.1); 
+        const dt = Math.min((timestamp - engine.lastTime) / 1000, 0.1);
         engine.lastTime = timestamp;
 
         const canvas = canvasRef.current!;
-        const ctx = canvas.getContext('2d', { alpha: false })!; // Optimize for no transparency
+        const ctx = canvas.getContext('2d', { alpha: false })!;
 
         // 1. Draw Background (Clear)
         ctx.fillStyle = GAME_CONFIG.COLORS.WHITE;
@@ -512,7 +626,6 @@ const DinoGame: React.FC = () => {
 
         // 3. Logic & Draw Ground Details
         spawnGroundDetails(dt);
-        // Using For loop instead of forEach for perf
         for(let i = 0; i < engine.groundPool.length; i++) {
             const detail = engine.groundPool[i];
             if (detail.active) {
@@ -521,60 +634,116 @@ const DinoGame: React.FC = () => {
             }
         }
 
-        // 4. Logic & Draw Dino
-        engine.dino.update(dt, () => {
-            if (!mutedRef.current) SoundSynth.playStep();
-        });
-        engine.dino.draw(ctx);
+        // 4. Logic & Draw All Dinos
+        for (let d = 0; d < engine.dinos.length; d++) {
+            const dino = engine.dinos[d];
+            dino.update(dt, () => {
+                if (!mutedRef.current && d === 0) SoundSynth.playStep();
+            });
+            dino.draw(ctx);
+        }
 
-        // 5. Logic & Draw Obstacles
+        // 5. Logic & Draw Obstacles + Collision for all dinos
         spawnObstacle(dt);
-        const dino = engine.dino;
         const padding = 10;
-        
+
         for(let i = 0; i < engine.obstaclePool.length; i++) {
             const obs = engine.obstaclePool[i];
             if (obs.active) {
                 obs.update(dt, engine.gameSpeed);
                 obs.draw(ctx);
-                
-                // Collision Detection (Active obstacles only)
-                if (
-                    dino.x < obs.x + obs.width - padding &&
-                    dino.x + dino.width > obs.x + padding &&
-                    dino.y < obs.y + obs.height - padding &&
-                    dino.y + dino.height > obs.y + padding
-                ) {
-                    gameOver();
-                    // Don't return, let the frame finish drawing
+
+                for (let d = 0; d < engine.dinos.length; d++) {
+                    const dino = engine.dinos[d];
+                    if (
+                        dino.x < obs.x + obs.width - padding &&
+                        dino.x + dino.width > obs.x + padding &&
+                        dino.y < obs.y + obs.height - padding &&
+                        dino.y + dino.height > obs.y + padding
+                    ) {
+                        gameOver();
+                    }
                 }
             }
         }
 
-        // 6. Draw Score
-        if (engine.gameRunning) { // Double check in case of game over mid-loop
+        // 6. Logic & Draw Collectibles + Collision for all dinos
+        spawnCollectibles(dt);
+        for (let i = 0; i < engine.collectiblePool.length; i++) {
+            const col = engine.collectiblePool[i];
+            if (col.active) {
+                col.update(dt, engine.gameSpeed);
+                col.draw(ctx);
+
+                for (let d = 0; d < engine.dinos.length; d++) {
+                    const dino = engine.dinos[d];
+                    if (
+                        dino.x < col.x + col.width &&
+                        dino.x + dino.width > col.x &&
+                        dino.y < col.y + col.height &&
+                        dino.y + dino.height > col.y
+                    ) {
+                        col.active = false;
+                        dino.collectibleScore++;
+                        if (!mutedRef.current) SoundSynth.playCollect();
+                    }
+                }
+            }
+        }
+
+        // 7. Draw Score
+        if (engine.gameRunning) {
             engine.score += 60 * dt;
-            const scoreStr = `HI ${Math.floor(engine.score/10)}`;
-            // Font is set once ideally, but to be safe:
             ctx.font = "16px 'Press Start 2P'";
             ctx.textAlign = "right";
+            ctx.fillStyle = GAME_CONFIG.COLORS.PRIMARY;
+
+            // Main score
+            const scoreStr = `HI ${Math.floor(engine.score/10)}`;
             ctx.fillText(scoreStr, canvas.width - 20, 30);
-            
+
+            // Collectible scores per player
+            ctx.textAlign = "left";
+            ctx.font = "10px 'Press Start 2P'";
+            for (let d = 0; d < engine.dinos.length; d++) {
+                const dino = engine.dinos[d];
+                ctx.fillStyle = dino.color;
+                const label = engine.dinos.length > 1 ? `P${d+1}` : '';
+                ctx.fillText(`${label}\u2605${dino.collectibleScore}`, 10, 25 + d * 16);
+            }
+
             engine.animationId = requestAnimationFrame(runGameLoop);
         }
     };
 
     const resetGame = () => {
         const engine = engineRef.current;
-        
+        const count = playerCountRef.current;
+
         // Deactivate all pool items
         engine.obstaclePool.forEach(p => p.active = false);
         engine.groundPool.forEach(p => p.active = false);
-        
+        engine.collectiblePool.forEach(p => p.active = false);
+
         // Populate initial ground
         for (let x = 0; x < GAME_CONFIG.CANVAS_WIDTH; x += 30 + Math.random() * 60) {
             const detail = getFromPool(engine.groundPool, () => new GroundDetail());
             detail.spawn(x);
+        }
+
+        // Create dinos for player count
+        engine.dinos = [];
+        for (let i = 0; i < count; i++) {
+            const dino = createDino(i, PLAYER_COLORS[i]);
+            dino.x = GAME_CONFIG.DINO_START_X + i * 15;
+            dino.reset();
+            engine.dinos.push(dino);
+        }
+
+        // Reset vision state for all players
+        visionRef.current.players = [];
+        for (let i = 0; i < count; i++) {
+            visionRef.current.players.push(createPlayerVisionState());
         }
 
         engine.score = 0;
@@ -582,13 +751,13 @@ const DinoGame: React.FC = () => {
         engine.gameSpeed = GAME_CONFIG.INITIAL_SPEED;
         engine.spawnTimer = 0;
         engine.groundSpawnTimer = 0;
-        engine.dino.reset();
+        engine.collectibleSpawnTimer = 2;
         engine.lastTime = 0;
         engine.gameRunning = true;
-        
+
         setGameRunning(true);
         setCanRestart(false);
-        
+
         runGameLoop(0);
     };
 
@@ -599,17 +768,20 @@ const DinoGame: React.FC = () => {
         resetGame();
     };
 
-    const handleJumpSignal = () => {
-        if (jumpSignalRef.current) {
+    const handleJumpSignal = (playerIndex: number) => {
+        if (playerIndex === 0 && jumpSignalRef.current) {
             jumpSignalRef.current.classList.add('active');
             setTimeout(() => jumpSignalRef.current?.classList.remove('active'), 200);
         }
 
         const engine = engineRef.current;
         if (engine.gameRunning) {
-            const jumped = engine.dino.jump();
-            if (jumped && !mutedRef.current) {
-                SoundSynth.playJump();
+            const dino = engine.dinos[playerIndex];
+            if (dino) {
+                const jumped = dino.jump();
+                if (jumped && !mutedRef.current) {
+                    SoundSynth.playJump();
+                }
             }
         } else if (!engine.gameRunning && engine.canRestart) {
             resetGame();
@@ -624,7 +796,7 @@ const DinoGame: React.FC = () => {
         const video = videoRef.current;
         const outCanvas = outputCanvasRef.current;
         const engine = engineRef.current;
-        
+
         if (!video || !outCanvas || !visionRef.current.poseLandmarker) {
             engine.visionAnimationId = requestAnimationFrame(predictWebcam);
             return;
@@ -651,77 +823,103 @@ const DinoGame: React.FC = () => {
         }
 
         const outCtx = outCanvas.getContext('2d', { alpha: true })!;
-        
+
         let didUpdate = false;
         if (state.lastVideoTime !== video.currentTime) {
             state.lastVideoTime = video.currentTime;
             state.results = poseLandmarker.detectForVideo(video, now);
             didUpdate = true;
         }
-        
+
         outCtx.clearRect(0, 0, outCanvas.width, outCanvas.height);
-        
+
         if (state.results && state.results.landmarks && state.results.landmarks.length > 0) {
-            const landmarks = state.results.landmarks[0];
-            const leftShoulder = landmarks[11];
-            const rightShoulder = landmarks[12];
+            const numPoses = Math.min(state.results.landmarks.length, playerCountRef.current);
 
-            outCtx.beginPath();
-            outCtx.moveTo(leftShoulder.x * outCanvas.width, leftShoulder.y * outCanvas.height);
-            outCtx.lineTo(rightShoulder.x * outCanvas.width, rightShoulder.y * outCanvas.height);
-            outCtx.strokeStyle = GAME_CONFIG.COLORS.ACCENT;
-            outCtx.lineWidth = 3;
-            outCtx.stroke();
+            for (let p = 0; p < numPoses; p++) {
+                const landmarks = state.results.landmarks[p];
+                const leftShoulder = landmarks[11];
+                const rightShoulder = landmarks[12];
+                const pColor = PLAYER_COLORS[p] || PLAYER_COLORS[0];
 
-            outCtx.fillStyle = '#00FF00';
-            // Simple loop
-            const shoulders = [leftShoulder, rightShoulder];
-            for (let i = 0; i < shoulders.length; i++) {
+                // Draw shoulder line
                 outCtx.beginPath();
-                outCtx.arc(shoulders[i].x * outCanvas.width, shoulders[i].y * outCanvas.height, 5, 0, 2 * Math.PI);
-                outCtx.fill();
+                outCtx.moveTo(leftShoulder.x * outCanvas.width, leftShoulder.y * outCanvas.height);
+                outCtx.lineTo(rightShoulder.x * outCanvas.width, rightShoulder.y * outCanvas.height);
+                outCtx.strokeStyle = pColor;
+                outCtx.lineWidth = 3;
+                outCtx.stroke();
+
+                // Draw shoulder points
+                outCtx.fillStyle = pColor;
+                const shoulders = [leftShoulder, rightShoulder];
+                for (let i = 0; i < shoulders.length; i++) {
+                    outCtx.beginPath();
+                    outCtx.arc(shoulders[i].x * outCanvas.width, shoulders[i].y * outCanvas.height, 5, 0, 2 * Math.PI);
+                    outCtx.fill();
+                }
+
+                // Player label
+                outCtx.save();
+                outCtx.scale(-1, 1);
+                outCtx.fillStyle = pColor;
+                outCtx.font = '14px monospace';
+                outCtx.fillText(`P${p+1}`, -(leftShoulder.x * outCanvas.width + 20), leftShoulder.y * outCanvas.height - 10);
+                outCtx.restore();
+
+                if (didUpdate) {
+                    // Ensure player vision state exists
+                    while (state.players.length <= p) {
+                        state.players.push(createPlayerVisionState());
+                    }
+                    const ps = state.players[p];
+
+                    const currentY = (leftShoulder.y + rightShoulder.y) / 2;
+                    const shoulderDist = Math.hypot(leftShoulder.x - rightShoulder.x, leftShoulder.y - rightShoulder.y);
+
+                    const currentTime = video.currentTime;
+                    let currentVelocity = 0;
+
+                    if (ps.prevTime > 0 && currentTime > ps.prevTime) {
+                        const dt = currentTime - ps.prevTime;
+                        const dy = ps.prevY - currentY;
+                        const normalizedDy = dy / shoulderDist;
+                        currentVelocity = normalizedDy / dt;
+                    }
+
+                    ps.smoothedVelocity = ps.smoothedVelocity * 0.3 + currentVelocity * 0.7;
+
+                    if (ps.smoothedVelocity > ps.peakVelocity) {
+                        ps.peakVelocity = ps.smoothedVelocity;
+                    } else {
+                        ps.peakVelocity *= 0.95;
+                    }
+
+                    ps.prevY = currentY;
+                    ps.prevTime = currentTime;
+
+                    if (ps.smoothedVelocity > state.JUMP_VELOCITY_THRESHOLD) {
+                        handleJumpSignal(p);
+                    }
+                }
             }
 
-            if (didUpdate) {
-                const currentY = (leftShoulder.y + rightShoulder.y) / 2;
-                const shoulderDist = Math.hypot(leftShoulder.x - rightShoulder.x, leftShoulder.y - rightShoulder.y);
-                
-                const currentTime = video.currentTime;
-                let currentVelocity = 0;
-
-                if (state.prevTime > 0 && currentTime > state.prevTime) {
-                    const dt = currentTime - state.prevTime; 
-                    const dy = state.prevY - currentY; 
-                    const normalizedDy = dy / shoulderDist;
-                    currentVelocity = normalizedDy / dt;
-                }
-                
-                state.smoothedVelocity = state.smoothedVelocity * 0.3 + currentVelocity * 0.7;
-                
-                if (state.smoothedVelocity > state.peakVelocity) {
-                    state.peakVelocity = state.smoothedVelocity;
-                } else {
-                    state.peakVelocity *= 0.95;
-                }
-
-                state.prevY = currentY;
-                state.prevTime = currentTime;
-                
-                if (state.smoothedVelocity > state.JUMP_VELOCITY_THRESHOLD) {
-                    handleJumpSignal();
-                }
+            // Draw debug overlay for first player
+            if (state.players.length > 0) {
+                drawDebugOverlay(outCtx, state, 0);
             }
-
-            drawDebugOverlay(outCtx, state);
         }
 
         engine.visionAnimationId = requestAnimationFrame(predictWebcam);
     };
 
-    const drawDebugOverlay = (ctx: CanvasRenderingContext2D, state: VisionState) => {
+    const drawDebugOverlay = (ctx: CanvasRenderingContext2D, state: VisionState, playerIdx: number) => {
+        const ps = state.players[playerIdx];
+        if (!ps) return;
+
         const barH = 100;
         const barW = 15;
-        const barX = 20; 
+        const barX = 20;
         const barY = 50;
         const maxVal = state.JUMP_VELOCITY_THRESHOLD * 1.5;
 
@@ -733,23 +931,23 @@ const DinoGame: React.FC = () => {
         ctx.fillStyle = 'red';
         ctx.fillRect(barX - 5, threshY, barW + 10, 2);
 
-        const fillRatio = Math.min(Math.max(state.smoothedVelocity / maxVal, 0), 1);
+        const fillRatio = Math.min(Math.max(ps.smoothedVelocity / maxVal, 0), 1);
         const currentH = fillRatio * barH;
-        
-        const isCrossing = state.smoothedVelocity > state.JUMP_VELOCITY_THRESHOLD;
+
+        const isCrossing = ps.smoothedVelocity > state.JUMP_VELOCITY_THRESHOLD;
         ctx.fillStyle = isCrossing ? '#00FF00' : '#FFFF00';
         ctx.fillRect(barX, barY + barH - currentH, barW, currentH);
 
-        const peakRatio = Math.min(Math.max(state.peakVelocity / maxVal, 0), 1);
+        const peakRatio = Math.min(Math.max(ps.peakVelocity / maxVal, 0), 1);
         const peakH = peakRatio * barH;
-        ctx.fillStyle = 'rgba(0, 255, 0, 0.7)'; 
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.7)';
         ctx.fillRect(barX, barY + barH - peakH, barW, 2);
 
         ctx.save();
-        ctx.scale(-1, 1); 
+        ctx.scale(-1, 1);
         ctx.fillStyle = '#00FF00';
         ctx.font = '12px monospace';
-        ctx.fillText(`VEL : ${state.smoothedVelocity.toFixed(2)}`, -(barX + 70), barY + barH + 20);
+        ctx.fillText(`VEL : ${ps.smoothedVelocity.toFixed(2)}`, -(barX + 70), barY + barH + 20);
         ctx.fillStyle = 'red';
         ctx.fillText(`THR : ${state.JUMP_VELOCITY_THRESHOLD.toFixed(2)}`, -(barX + 70), barY + barH + 35);
         ctx.restore();
@@ -763,7 +961,7 @@ const DinoGame: React.FC = () => {
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: { width: 640, height: 480 }
             });
-            
+
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
                 videoRef.current.addEventListener("loadeddata", () => {
@@ -783,18 +981,18 @@ const DinoGame: React.FC = () => {
             try {
                 // @ts-ignore
                 const { PoseLandmarker, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/+esm");
-                
+
                 const vision = await FilesetResolver.forVisionTasks(
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
                 );
-                
+
                 visionRef.current.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
                     baseOptions: {
                         modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`,
                         delegate: "GPU"
                     },
                     runningMode: "VIDEO",
-                    numPoses: 1
+                    numPoses: 4
                 });
 
                 setIsLoading(false);
@@ -815,12 +1013,12 @@ const DinoGame: React.FC = () => {
 
     return (
         <div className="flex flex-col items-center gap-5 w-full max-w-4xl relative">
-            
+
             {/* GAME CANVAS */}
             <div className="relative">
-                <canvas 
-                    ref={canvasRef} 
-                    width={GAME_CONFIG.CANVAS_WIDTH} 
+                <canvas
+                    ref={canvasRef}
+                    width={GAME_CONFIG.CANVAS_WIDTH}
                     height={GAME_CONFIG.CANVAS_HEIGHT}
                     className="bg-white border-2 border-[#333] rounded-lg shadow-md max-w-full"
                 />
@@ -848,7 +1046,7 @@ const DinoGame: React.FC = () => {
                         {isMuted ? "Unmute" : "Mute"}
                     </span>
                 </button>
-                
+
                 {/* START SCREEN */}
                 {(!gameRunning && !canRestart && !hasStarted) && (
                     <div className="absolute top-0 left-0 w-full h-full bg-white/80 flex flex-col items-center justify-center z-10 rounded-lg">
@@ -860,16 +1058,44 @@ const DinoGame: React.FC = () => {
                         ) : (
                             <div className="flex flex-col items-center gap-4">
                                 {!cameraReady ? (
-                                    <button 
-                                        onClick={enableCam} 
+                                    <button
+                                        onClick={enableCam}
                                         className={`px-5 py-3 bg-transparent border-2 border-[#535353] text-[#535353] font-press-start text-base cursor-pointer hover:bg-[#535353] hover:text-white transition-colors focus:outline-none focus:ring-2 focus:ring-[${GAME_CONFIG.COLORS.FOCUS}] focus:ring-offset-2`}
                                     >
                                         ENABLE CAMERA
                                     </button>
                                 ) : (
                                     <>
-                                        <button 
-                                            onClick={manualStart} 
+                                        {/* Player Count Selector */}
+                                        <div className="flex items-center gap-3 mb-2">
+                                            <span className="font-press-start text-xs text-[#535353]">PLAYERS:</span>
+                                            {[1, 2, 3, 4].map(n => (
+                                                <button
+                                                    key={n}
+                                                    onClick={() => setPlayerCount(n)}
+                                                    className={`w-10 h-10 font-press-start text-sm border-2 rounded transition-colors ${
+                                                        playerCount === n
+                                                            ? 'bg-[#535353] text-white border-[#535353]'
+                                                            : 'bg-transparent text-[#535353] border-[#535353] hover:bg-[#535353] hover:text-white'
+                                                    }`}
+                                                >
+                                                    {n}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        {/* Player color indicators */}
+                                        {playerCount > 1 && (
+                                            <div className="flex gap-2 mb-2">
+                                                {Array.from({length: playerCount}, (_, i) => (
+                                                    <div key={i} className="flex items-center gap-1">
+                                                        <div className="w-3 h-3 rounded-full" style={{backgroundColor: PLAYER_COLORS[i]}}></div>
+                                                        <span className="font-press-start text-[8px]" style={{color: PLAYER_COLORS[i]}}>P{i+1}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        <button
+                                            onClick={manualStart}
                                             className={`px-5 py-3 bg-[#535353] border-2 border-[#535353] text-white font-press-start text-base cursor-pointer hover:bg-[${GAME_CONFIG.COLORS.FOCUS}] hover:border-[${GAME_CONFIG.COLORS.FOCUS}] transition-colors focus:outline-none focus:ring-2 focus:ring-[${GAME_CONFIG.COLORS.FOCUS}] focus:ring-offset-2`}
                                         >
                                             START GAME
@@ -906,9 +1132,9 @@ const DinoGame: React.FC = () => {
             {/* CONTROLS */}
             <div className="mt-2 text-xs text-[#888] text-center font-press-start flex gap-4">
                 <label className="cursor-pointer flex items-center justify-center hover:text-[#535353] transition-colors">
-                    <input 
-                        type="checkbox" 
-                        checked={showVision} 
+                    <input
+                        type="checkbox"
+                        checked={showVision}
                         onChange={(e) => setShowVision(e.target.checked)}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter') {
@@ -923,20 +1149,20 @@ const DinoGame: React.FC = () => {
             </div>
 
             {/* VISION CONTAINER */}
-            <div 
+            <div
                 className={`relative w-[320px] h-[240px] border-2 border-[#ccc] rounded-lg overflow-hidden bg-black ${showVision ? 'block' : 'hidden'}`}
             >
-                <video 
-                    ref={videoRef} 
-                    autoPlay 
-                    playsInline 
+                <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
                     className="w-full h-full object-cover scale-x-[-1]"
                 ></video>
-                <canvas 
-                    ref={outputCanvasRef} 
+                <canvas
+                    ref={outputCanvasRef}
                     className="absolute top-0 left-0 w-full h-full scale-x-[-1]"
                 ></canvas>
-                <div 
+                <div
                     ref={jumpSignalRef}
                     className="absolute top-[10px] right-[10px] w-5 h-5 bg-[#ccc] rounded-full transition-all duration-100 [&.active]:bg-[#ff5252] [&.active]:shadow-[0_0_10px_#ff5252]"
                 ></div>

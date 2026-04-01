@@ -421,7 +421,7 @@ const DinoGame: React.FC = () => {
         prevTime: 0,
         smoothedVelocity: 0,
         peakVelocity: 0,
-        JUMP_VELOCITY_THRESHOLD: 2.5,
+        JUMP_VELOCITY_THRESHOLD: 1.2,
         lastPredictionTime: 0
     });
 
@@ -696,7 +696,7 @@ const DinoGame: React.FC = () => {
                     currentVelocity = normalizedDy / dt;
                 }
                 
-                state.smoothedVelocity = state.smoothedVelocity * 0.5 + currentVelocity * 0.5;
+                state.smoothedVelocity = state.smoothedVelocity * 0.3 + currentVelocity * 0.7;
                 
                 if (state.smoothedVelocity > state.peakVelocity) {
                     state.peakVelocity = state.smoothedVelocity;
@@ -761,7 +761,7 @@ const DinoGame: React.FC = () => {
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 320, height: 240 }
+                video: { width: 640, height: 480 }
             });
             
             if (videoRef.current) {

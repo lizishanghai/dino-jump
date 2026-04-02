@@ -40,7 +40,7 @@ interface DinoEntity {
     color: string;
     playerIndex: number;
     collectibleScore: number;
-    jump: () => boolean;
+    jump: (velocity?: number) => boolean;
     update: (dt: number, onStep?: () => void) => void;
     draw: (ctx: CanvasRenderingContext2D) => void;
     reset: () => void;
@@ -63,6 +63,8 @@ interface GameEngineState {
     dinos: DinoEntity[];
     hasStarted: boolean;
     cameraReady: boolean;
+    elapsedTime: number;
+    lastSpeedUpTime: number;
 }
 
 // --- CONSTANTS ---
@@ -75,11 +77,12 @@ const GAME_CONFIG = {
     CANVAS_WIDTH: 800,
     CANVAS_HEIGHT: 300,
     GROUND_Y: 242,
-    GRAVITY: 4000,
-    JUMP_FORCE: 1000,
-    INITIAL_SPEED: 200,
+    GRAVITY: 1386,
+    JUMP_FORCE_MIN: 700,
+    JUMP_FORCE_MAX: 950,
+    INITIAL_SPEED: 120,
     MAX_SPEED: 600,
-    SPEED_INCREMENT: 5,
+    SPEED_UP_INTERVAL: 60,
     DINO_START_X: 50,
     DINO_GROUND_Y: 200,
     VISION_FPS: 30,
@@ -308,7 +311,7 @@ class Collectible {
 
     spawn(startX: number) {
         this.x = startX;
-        this.y = 150 + Math.random() * 70;
+        this.y = 80 + Math.random() * 80;
         this.type = COLLECTIBLE_TYPES[Math.floor(Math.random() * COLLECTIBLE_TYPES.length)];
         this.active = true;
     }
@@ -433,9 +436,12 @@ const createDino = (playerIndex: number, color: string): DinoEntity => ({
         ctx.fillStyle = GAME_CONFIG.COLORS.PRIMARY;
     },
 
-    jump() {
+    jump(velocity?: number) {
         if (this.grounded && this.jumpTimer <= 0) {
-            this.dy = -GAME_CONFIG.JUMP_FORCE;
+            // Scale jump force based on real jump velocity (1.2 = threshold, ~4.0 = big jump)
+            const t = velocity ? Math.min(Math.max((velocity - 1.0) / 3.0, 0), 1) : 0.5;
+            const force = GAME_CONFIG.JUMP_FORCE_MIN + t * (GAME_CONFIG.JUMP_FORCE_MAX - GAME_CONFIG.JUMP_FORCE_MIN);
+            this.dy = -force;
             this.grounded = false;
             this.jumpTimer = 0.1;
             return true;
@@ -513,7 +519,9 @@ const DinoGame: React.FC = () => {
         visionAnimationId: 0,
         dinos: [createDino(0, PLAYER_COLORS[0])],
         hasStarted: false,
-        cameraReady: false
+        cameraReady: false,
+        elapsedTime: 0,
+        lastSpeedUpTime: 0
     });
 
     // --- VISION STATE (Mutable) ---
@@ -542,21 +550,17 @@ const DinoGame: React.FC = () => {
 
         if (engine.spawnTimer <= 0) {
             const r = Math.random();
-            let count = r > 0.8 ? 3 : (r > 0.5 ? 2 : 1);
+            let count = r > 0.9 ? 2 : 1;
 
             let nextX = GAME_CONFIG.CANVAS_WIDTH;
 
             for (let i = 0; i < count; i++) {
                 const cactus = getFromPool(engine.obstaclePool, () => new Cactus());
                 cactus.spawn(nextX);
-                nextX += cactus.width + (5 + Math.random() * 20);
+                nextX += cactus.width + (10 + Math.random() * 25);
             }
 
-            engine.spawnTimer = 1.0 + (count * 0.4) + Math.random() * 1.2;
-
-            if(engine.gameSpeed < GAME_CONFIG.MAX_SPEED) {
-                engine.gameSpeed += GAME_CONFIG.SPEED_INCREMENT;
-            }
+            engine.spawnTimer = 2.0 + (count * 0.5) + Math.random() * 1.5;
         }
     };
 
@@ -564,8 +568,17 @@ const DinoGame: React.FC = () => {
         const engine = engineRef.current;
         engine.collectibleSpawnTimer -= dt;
         if (engine.collectibleSpawnTimer <= 0) {
+            // Find a nearby active obstacle to place collectible above
+            let spawnX = GAME_CONFIG.CANVAS_WIDTH;
+            for (let i = 0; i < engine.obstaclePool.length; i++) {
+                const obs = engine.obstaclePool[i];
+                if (obs.active && obs.x > GAME_CONFIG.CANVAS_WIDTH * 0.6) {
+                    spawnX = obs.x + obs.width / 2 - 10;
+                    break;
+                }
+            }
             const collectible = getFromPool(engine.collectiblePool, () => new Collectible());
-            collectible.spawn(GAME_CONFIG.CANVAS_WIDTH);
+            collectible.spawn(spawnX);
             engine.collectibleSpawnTimer = 3.0 + Math.random() * 2.0;
         }
     };
@@ -605,6 +618,15 @@ const DinoGame: React.FC = () => {
         if (!engine.lastTime) engine.lastTime = timestamp;
         const dt = Math.min((timestamp - engine.lastTime) / 1000, 0.1);
         engine.lastTime = timestamp;
+
+        // Time-based speed increase: every 60 seconds
+        engine.elapsedTime += dt;
+        if (engine.elapsedTime - engine.lastSpeedUpTime >= GAME_CONFIG.SPEED_UP_INTERVAL) {
+            engine.lastSpeedUpTime = engine.elapsedTime;
+            if (engine.gameSpeed < GAME_CONFIG.MAX_SPEED) {
+                engine.gameSpeed = Math.min(engine.gameSpeed + 60, GAME_CONFIG.MAX_SPEED);
+            }
+        }
 
         const canvas = canvasRef.current!;
         const ctx = canvas.getContext('2d', { alpha: false })!;
@@ -749,10 +771,12 @@ const DinoGame: React.FC = () => {
         engine.score = 0;
         engine.canRestart = false;
         engine.gameSpeed = GAME_CONFIG.INITIAL_SPEED;
-        engine.spawnTimer = 0;
+        engine.spawnTimer = 3;
         engine.groundSpawnTimer = 0;
         engine.collectibleSpawnTimer = 2;
         engine.lastTime = 0;
+        engine.elapsedTime = 0;
+        engine.lastSpeedUpTime = 0;
         engine.gameRunning = true;
 
         setGameRunning(true);
@@ -768,7 +792,7 @@ const DinoGame: React.FC = () => {
         resetGame();
     };
 
-    const handleJumpSignal = (playerIndex: number) => {
+    const handleJumpSignal = (playerIndex: number, velocity?: number) => {
         if (playerIndex === 0 && jumpSignalRef.current) {
             jumpSignalRef.current.classList.add('active');
             setTimeout(() => jumpSignalRef.current?.classList.remove('active'), 200);
@@ -778,7 +802,7 @@ const DinoGame: React.FC = () => {
         if (engine.gameRunning) {
             const dino = engine.dinos[playerIndex];
             if (dino) {
-                const jumped = dino.jump();
+                const jumped = dino.jump(velocity);
                 if (jumped && !mutedRef.current) {
                     SoundSynth.playJump();
                 }
@@ -899,7 +923,7 @@ const DinoGame: React.FC = () => {
                     ps.prevTime = currentTime;
 
                     if (ps.smoothedVelocity > state.JUMP_VELOCITY_THRESHOLD) {
-                        handleJumpSignal(p);
+                        handleJumpSignal(p, ps.smoothedVelocity);
                     }
                 }
             }
